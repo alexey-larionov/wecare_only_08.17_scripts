@@ -1,0 +1,697 @@
+---
+title: "filter_by_inverted_af_wecare_only"
+output: html_document
+---
+
+started: Alexey Larionov, 27Feb2017  
+last updated: Alexey Larionov, 29Aug2017  
+
+# Summary
+
+Perform burden-style aggregation of inverted genotypes  
+SKAT-style genotypes inversion was done previously (for **total** AFs > 0.5)  
+
+- Calculate inv. AFs (MAFs)  
+- Remove variants with inv. AFs (MAFs) > 0.05  
+- Calculate some metrics  
+- Aggregate variants per gene  
+- Calculate some aggregated metrics (MAFs and MACs)  
+
+Result includes 8,649 genes 
+~2 rare protein-affecting variants per gene (mean)  
+~5.4 inv-aggr-alt-counts (mean) per gene (median = 2, MACs)  
+
+Input data: 17,857 vars x 478 cases  
+Output data: 16,809 vars x 478 cases  
+
+# start_section
+
+```{r start_section}
+
+# Start time
+Sys.time()
+
+# Clenan-up
+rm(list=ls())
+
+# Libraries location
+.libPaths("/home/alarionov/R/my_libs_r3.4.1/")
+
+# Base folder
+library(knitr)
+base_folder="/analysis/mtgroup_share/users/alexey/wecare_only_08.17"
+opts_knit$set(root.dir = base_folder)
+#setwd(base_folder)
+
+# Libraries
+library(dplyr)
+
+# Accessory function
+source(paste(base_folder, "scripts", "f03_qqunif_plot.R", sep="/")) # for qq-plots
+
+```
+
+# load_data
+
+```{r load_data}
+
+#base_folder="/analysis/mtgroup_share/users/alexey/wecare_only_08.17"
+load(paste(base_folder, "results", "r07_filter_by_variant_effect_wecare_only.RData", sep="/"))
+
+```
+
+# check_data
+
+```{r check_data}
+
+ls()
+
+dim(genotypes.mx)
+class(genotypes.mx)
+genotypes.mx[c(1:5,591),1:5] # 591 is inverted 
+
+dim(genotypes_inv.mx)
+class(genotypes_inv.mx)
+genotypes_inv.mx[c(1:5,591),1:5] # 591 is inverted 
+
+dim(kgen.df)
+colnames(kgen.df)
+kgen.df[1:5,1:5]
+
+dim(exac.df)
+colnames(exac.df)
+exac.df[1:5,1:5]
+
+dim(variants.df)
+str(variants.df)
+variants.df[1:5,1:5]
+
+dim(phenotypes.df)
+str(phenotypes.df)
+phenotypes.df[1:5,1:5]
+
+# Check consistency of rownames and colnames
+sum(colnames(genotypes.mx) != rownames(phenotypes.df))
+
+sum(rownames(genotypes.mx) != rownames(kgen.df))
+sum(rownames(genotypes.mx) != rownames(exac.df))
+sum(rownames(genotypes.mx) != rownames(variants.df))
+
+```
+
+# calculate_inv_AFs
+
+Invert genotypes and recalculate AFs if **total** AFs > 0.5  
+**Total** AFs are used instead of **control's** AFs for consistency with  
+"flipping" genotypes in SKAT  
+
+Calculate inverted an, ac, af in all samples and in sub-groups  
+
+```{r calculate_inv_AFs}
+
+# Prepare table for output
+variants_inv.df <- cbind(variants.df, 
+                     inverted=rep(FALSE,nrow(variants.df)),
+                     ac_inv=variants.df$ac_all,
+                     an_inv=variants.df$an_all,
+                     af_inv=variants.df$af_all,
+                     ac_cbc_inv=variants.df$ac_cbc,
+                     an_cbc_inv=variants.df$an_cbc,
+                     af_cbc_inv=variants.df$af_cbc,
+                     ac_ubc_inv=variants.df$ac_ubc,
+                     an_ubc_inv=variants.df$an_ubc,
+                     af_ubc_inv=variants.df$af_ubc,
+                     ac_cbc_fam_inv=variants.df$ac_cbc_fam,
+                     an_cbc_fam_inv=variants.df$an_cbc_fam,
+                     af_cbc_fam_inv=variants.df$af_cbc_fam,
+                     ac_cbc_nofam_inv=variants.df$ac_cbc_nofam,
+                     an_cbc_nofam_inv=variants.df$an_cbc_nofam,
+                     af_cbc_nofam_inv=variants.df$af_cbc_nofam,
+                     ac_ubc_fam_inv=variants.df$ac_ubc_fam,
+                     an_ubc_fam_inv=variants.df$an_ubc_fam,
+                     af_ubc_fam_inv=variants.df$af_ubc_fam,
+                     ac_ubc_nofam_inv=variants.df$ac_ubc_nofam,
+                     an_ubc_nofam_inv=variants.df$an_ubc_nofam,
+                     af_ubc_nofam_inv=variants.df$af_ubc_nofam)
+
+# Select subgroups of samples
+cbc_cases <- phenotypes.df$cc == 1
+sum(cbc_cases)
+
+ubc_cases <- phenotypes.df$cc == 0
+sum(ubc_cases)
+
+cbc_fam_cases <- phenotypes.df$cc == 1 & phenotypes.df$family_history == 1
+sum(cbc_fam_cases)
+
+cbc_nofam_cases <- phenotypes.df$cc == 1 & phenotypes.df$family_history == 0
+sum(cbc_nofam_cases)
+
+ubc_fam_cases <- phenotypes.df$cc == 0 & phenotypes.df$family_history == 1
+sum(ubc_fam_cases)
+
+ubc_nofam_cases <- phenotypes.df$cc == 0 & phenotypes.df$family_history == 0
+sum(ubc_nofam_cases)
+
+# For each variant
+for(var in 1:nrow(variants_inv.df)){
+  
+  # if total AF > 0.5 
+  if(variants_inv.df[var,"af_all"] > 0.5){
+    
+    # Flag variant
+    TRUE -> variants_inv.df[var, "inverted"]
+    
+    # Get inverted genotypes 
+    genotypes_inv <- genotypes_inv.mx[var,]
+
+    # Calculate total inverted AFs
+    ac_inv <- sum(genotypes_inv, na.rm=TRUE)
+    an_inv <- 2*sum(!is.na(genotypes_inv))
+    af_inv <- ac_inv/an_inv
+
+    # Calculate inverted cbc AFs
+    ac_cbc_inv <- sum(genotypes_inv[cbc_cases], na.rm=TRUE)
+    an_cbc_inv <- 2*sum(!is.na(genotypes_inv[cbc_cases]))
+    af_cbc_inv <- ac_cbc_inv/an_cbc_inv
+
+    # Calculate inverted ubc AFs
+    ac_ubc_inv <- sum(genotypes_inv[ubc_cases], na.rm=TRUE)
+    an_ubc_inv <- 2*sum(!is.na(genotypes_inv[ubc_cases]))
+    af_ubc_inv <- ac_ubc_inv/an_ubc_inv
+
+    # Calculate inverted cbc_fam AFs
+    ac_cbc_fam_inv <- sum(genotypes_inv[cbc_fam_cases], na.rm=TRUE)
+    an_cbc_fam_inv <- 2*sum(!is.na(genotypes_inv[cbc_fam_cases]))
+    af_cbc_fam_inv <- ac_cbc_fam_inv/an_cbc_fam_inv
+    
+    # Calculate inverted cbc_nofam AFs
+    ac_cbc_nofam_inv <- sum(genotypes_inv[cbc_nofam_cases], na.rm=TRUE)
+    an_cbc_nofam_inv <- 2*sum(!is.na(genotypes_inv[cbc_nofam_cases]))
+    af_cbc_nofam_inv <- ac_cbc_nofam_inv/an_cbc_nofam_inv
+    
+    # Calculate inverted ubc_fam AFs
+    ac_ubc_fam_inv <- sum(genotypes_inv[ubc_fam_cases], na.rm=TRUE)
+    an_ubc_fam_inv <- 2*sum(!is.na(genotypes_inv[ubc_fam_cases]))
+    af_ubc_fam_inv <- ac_ubc_fam_inv/an_ubc_fam_inv
+    
+    # Calculate inverted ubc_nofam AFs
+    ac_ubc_nofam_inv <- sum(genotypes_inv[ubc_nofam_cases], na.rm=TRUE)
+    an_ubc_nofam_inv <- 2*sum(!is.na(genotypes_inv[ubc_nofam_cases]))
+    af_ubc_nofam_inv <- ac_ubc_nofam_inv/an_ubc_nofam_inv
+
+    # Add inverted AFs to the variants data.frame
+    variants_inv.df[var, c("ac_inv", "an_inv", "af_inv", 
+                           "ac_cbc_inv", "an_cbc_inv", "af_cbc_inv", 
+                           "ac_ubc_inv", "an_ubc_inv", "af_ubc_inv",
+                           "ac_cbc_fam_inv", "an_cbc_fam_inv", "af_cbc_fam_inv", 
+                           "ac_cbc_nofam_inv", "an_cbc_nofam_inv", "af_cbc_nofam_inv", 
+                           "ac_ubc_fam_inv", "an_ubc_fam_inv", "af_ubc_fam_inv", 
+                           "ac_ubc_nofam_inv", "an_ubc_nofam_inv", "af_ubc_nofam_inv")] <- 
+      c(ac_inv, an_inv, af_inv, 
+        ac_cbc_inv, an_cbc_inv, af_cbc_inv, 
+        ac_ubc_inv, an_ubc_inv, af_ubc_inv,
+        ac_cbc_fam_inv, an_cbc_fam_inv, af_cbc_fam_inv, 
+        ac_cbc_nofam_inv, an_cbc_nofam_inv, af_cbc_nofam_inv, 
+        ac_ubc_fam_inv, an_ubc_fam_inv, af_ubc_fam_inv, 
+        ac_ubc_nofam_inv, an_ubc_nofam_inv, af_ubc_nofam_inv)
+    
+    # Clean-up
+    rm(genotypes_inv, 
+       ac_inv, an_inv, af_inv, 
+       ac_cbc_inv, an_cbc_inv, af_cbc_inv, 
+       ac_ubc_inv, an_ubc_inv, af_ubc_inv, 
+       ac_cbc_fam_inv, an_cbc_fam_inv, af_cbc_fam_inv, 
+       ac_cbc_nofam_inv, an_cbc_nofam_inv, af_cbc_nofam_inv, 
+       ac_ubc_fam_inv, an_ubc_fam_inv, af_ubc_fam_inv, 
+       ac_ubc_nofam_inv, an_ubc_nofam_inv, af_ubc_nofam_inv)
+
+  }
+}
+
+# Number of invered variants
+sum(variants_inv.df$inverted) # 150
+
+# Some effects of the inversion
+max(variants_inv.df$af_all) # ~0.99
+max(variants_inv.df$af_inv) # 0.5
+
+# clean-up
+rm(var, cbc_cases, ubc_cases, cbc_fam_cases, cbc_nofam_cases, ubc_fam_cases, ubc_nofam_cases)
+
+```
+
+# remove_common_variants
+
+Remove 1,048 variants with total inv. AFs (MAFs) > 0.05  
+16,809
+
+```{r remove_common_variants}
+
+# Make list of common variants
+common_variants <- variants_inv.df$af_all > 0.05
+sum(common_variants) # 1,048
+
+# Apply filter
+genotypes.mx <- genotypes.mx[!common_variants,]
+kgen.df <- kgen.df[!common_variants,]
+exac.df <- exac.df[!common_variants,]
+variants.df <- variants.df[!common_variants,]
+
+genotypes_inv.mx <- genotypes_inv.mx[!common_variants,]
+variants_inv.df <- variants_inv.df[!common_variants,]
+
+# Explore resuilts
+dim(genotypes.mx)
+max(variants.df$af_all) # ~0.05
+max(variants_inv.df$af_inv) # ~0.05
+
+# Clean-up
+rm(common_variants)
+
+```
+
+# --- explore selected variants --- #
+
+## count_selected_multiallelic_varaints
+
+370 multiallelics in selected varaints, preserved.  
+May violate some implicit intuitive statistical assumptions;  
+Should not have major effect because of the small number (<2%) and exclusion of HWE outliers.  
+
+```{r count_selected_multiallelic_varaints}
+
+summary(variants.df$Multiallelic) # 370
+
+```
+
+## explore_AFs_in_selected_variants
+
+Most of selected variants are rare (median ~0.1%)  
+The weihgting will further prioritise rare variants amongst the remaining ones.  
+
+```{r explore_AFs_in_selected_variants}
+
+mean(variants.df$af_all) # ~0.3%
+median(variants.df$af_all) # ~0.1%
+
+hist(variants.df$af_all, main="AFs of selected variants", labels = TRUE, ylim=c(0,20000), breaks=5)
+
+```
+
+## explore_variants_counts_per_gene
+
+```{r explore_variants_counts_per_gene}
+
+# Get number of genes
+length(unique(variants.df$SYMBOL)) # 8,649
+
+# Look at the top genes with high counts of variants
+x <- sort(table(as.vector(variants.df$SYMBOL)), decreasing = TRUE)
+x[1:200]
+
+# Table for histogram of numbers of protein-affecting variants per gene 
+# (not sure whether group_by preserves the order of genes etc, 
+# but this is not important here)
+y <- variants.df %>% group_by(SYMBOL) %>% summarise(n())
+"vars_count" -> colnames(y)[2]
+
+# Plot the histogram
+hist(y$vars_count, main="Histogram of numbers of protein-affecting variants per gene (wecare-only)", xlab="Variants per gene", ylab="Number of genes", ylim=c(0,8000), breaks=25, labels = TRUE)
+
+# Mean number of variants per gene
+mean(y$vars_count) # ~2.0
+
+# Clean-up
+rm(x,y)
+
+```
+
+# aggregate_per_gene
+
+```{r aggregate_per_gene}
+
+# Get list of genes
+genes <- unique(as.character(as.vector(variants.df$SYMBOL)))
+length(genes)
+
+# Make empty matrix for the inverted gene-aggregated data
+genes_inv_aggr_data.mx <- matrix(ncol=ncol(genotypes.mx),nrow=0)
+colnames(genes_inv_aggr_data.mx) <- colnames(genotypes.mx)
+
+# Calculate inverted gene-aggregated variants' counts
+for(gene in genes){
+  
+  # Get the gene's variants
+  vars <- variants.df$SYMBOL == gene
+  
+  # Get the number of variants
+  num_vars <- sum(vars)
+
+  # For single-variant genes
+  if(num_vars==1){
+    
+    # Nothing to aggregate
+    counts <- genotypes_inv.mx[vars,] # vector, preserves NA
+    0 -> counts[is.na(counts)] # equivalent to na.rm=TRUE below
+    
+  # For genes with multiple varians
+  }else{
+    
+    # Sum alleles in the variants 
+    counts <- apply(genotypes_inv.mx[vars,], 2, sum, na.rm=TRUE)
+    
+  }
+  
+  # Add result to output table
+  genes_inv_aggr_data.mx <- rbind(genes_inv_aggr_data.mx, counts)
+  
+  # Clean-up
+  rm(vars, num_vars, counts)
+  
+}
+
+# Check result
+# (atrix with aggregated inverted counts per gene per case)
+dim(genes_inv_aggr_data.mx)
+genes -> rownames(genes_inv_aggr_data.mx)
+genes_inv_aggr_data.mx[1:5,1:5]
+
+# Clean-up
+rm(gene, genes)
+
+```
+
+# make_inv_aggr_summary_per_gene
+
+```{r make_inv_aggr_summary_per_gene}
+
+# Get list of genes 
+# (check that there is no NAs; get rid of NAs if they are present!)
+genes <- unique(as.character(variants_inv.df$SYMBOL))
+length(genes)
+sum(is.na(genes))
+
+# Prepare blank matrix for output
+header <- c("gene", "num_var", "inverted", "multiallelic", 
+            "aggr_ac", "aggr_an", "aggr_af",  
+            "aggr_ac_cbc", "aggr_an_cbc", "aggr_af_cbc", 
+            "aggr_ac_ubc", "aggr_an_ubc", "aggr_af_ubc",
+            "aggr_ac_cbc_fam", "aggr_an_cbc_fam", "aggr_af_cbc_fam", 
+            "aggr_ac_cbc_nofam", "aggr_an_cbc_nofam", "aggr_af_cbc_nofam", 
+            "aggr_ac_ubc_fam", "aggr_an_ubc_fam", "aggr_af_ubc_fam", 
+            "aggr_ac_ubc_nofam", "aggr_an_ubc_nofam", "aggr_af_ubc_nofam",
+            "cbc_ubc_call", "cbc_ubc_fisher_p")
+
+genes_inv_aggr_info.mx <- matrix(nrow=0, ncol=length(header))
+header -> colnames(genes_inv_aggr_info.mx)
+
+# Get lists of samples in subgroups
+cbc_cases <- phenotypes.df$cc == 1
+sum(cbc_cases)
+
+ubc_cases <- phenotypes.df$cc == 0
+sum(ubc_cases)
+
+cbc_fam_cases <- phenotypes.df$cc == 1 & phenotypes.df$family_history == 1
+sum(cbc_fam_cases)
+
+cbc_nofam_cases <- phenotypes.df$cc == 1 & phenotypes.df$family_history == 0
+sum(cbc_nofam_cases)
+
+ubc_fam_cases <- phenotypes.df$cc == 0 & phenotypes.df$family_history == 1
+sum(ubc_fam_cases)
+
+ubc_nofam_cases <- phenotypes.df$cc == 0 & phenotypes.df$family_history == 0
+sum(ubc_nofam_cases)
+
+# For each gene
+for(gene in genes){
+  
+  # Get list of variants
+  vars <- variants_inv.df$SYMBOL == gene
+
+  # Count variants
+  num_var <- sum(vars)
+  
+  # Check if any variant is inverted
+  inverted <- FALSE
+  if(any(variants_inv.df[vars, "inverted"])) inverted <- TRUE
+  
+  # Check if any variant is multiallelic
+  multiallelic <- FALSE
+  if(any(variants_inv.df[vars, "Multiallelic"])) multiallelic <- TRUE
+  
+  # Get genotypes matrices for subgroups
+  gt <- genes_inv_aggr_data.mx[gene,]
+
+  gt_cbc <- gt[cbc_cases]
+  gt_ubc <- gt[ubc_cases]
+  
+  gt_cbc_fam <- gt[cbc_fam_cases]
+  gt_cbc_nofam <- gt[cbc_nofam_cases]
+  
+  gt_ubc_fam <- gt[ubc_fam_cases]
+  gt_ubc_nofam <- gt[ubc_nofam_cases]
+  
+  # Calculate aggregated metrics in sub-groups
+  aggr_ac <- sum(gt, na.rm=TRUE)
+  aggr_an <- 2*sum(!is.na(gt))
+  aggr_af <- aggr_ac / aggr_an
+  
+  aggr_ac_cbc <- sum(gt_cbc, na.rm=TRUE)
+  aggr_an_cbc <- 2*sum(!is.na(gt_cbc))
+  aggr_af_cbc <- aggr_ac_cbc / aggr_an_cbc
+  
+  aggr_ac_ubc <- sum(gt_ubc, na.rm=TRUE)
+  aggr_an_ubc <- 2*sum(!is.na(gt_ubc))
+  aggr_af_ubc <- aggr_ac_ubc / aggr_an_ubc
+
+  aggr_ac_cbc_fam <- sum(gt_cbc_fam, na.rm=TRUE)
+  aggr_an_cbc_fam <- 2*sum(!is.na(gt_cbc_fam))
+  aggr_af_cbc_fam <- aggr_ac_cbc_fam / aggr_an_cbc_fam
+
+  aggr_ac_cbc_nofam <- sum(gt_cbc_nofam, na.rm=TRUE)
+  aggr_an_cbc_nofam <- 2*sum(!is.na(gt_cbc_nofam))
+  aggr_af_cbc_nofam <- aggr_ac_cbc_nofam / aggr_an_cbc_nofam
+
+  aggr_ac_ubc_fam <- sum(gt_ubc_fam, na.rm=TRUE)
+  aggr_an_ubc_fam <- 2*sum(!is.na(gt_ubc_fam))
+  aggr_af_ubc_fam <- aggr_ac_ubc_fam / aggr_an_ubc_fam
+
+  aggr_ac_ubc_nofam <- sum(gt_ubc_nofam, na.rm=TRUE)
+  aggr_an_ubc_nofam <- 2*sum(!is.na(gt_ubc_nofam))
+  aggr_af_ubc_nofam <- aggr_ac_ubc_nofam / aggr_an_ubc_nofam
+  
+  # Call for cbc vs ubc
+  if(aggr_af_cbc == aggr_af_ubc) cbc_ubc_call <- "uncertain"
+  if(aggr_af_cbc > aggr_af_ubc) cbc_ubc_call <- "risk"
+  if(aggr_af_cbc < aggr_af_ubc) cbc_ubc_call <- "protective"
+  
+  # Fisher exact test: cbc vs ubc
+  test.mx <- matrix(c(aggr_ac_cbc, aggr_an_cbc - aggr_ac_cbc, aggr_ac_ubc, aggr_an_ubc - aggr_ac_ubc), nrow=2)
+  cbc_ubc_fisher_p <- fisher.test(test.mx)$p.value
+
+  # Record to result matrix 
+  genes_inv_aggr_info.mx <- rbind(genes_inv_aggr_info.mx, c(gene, num_var, inverted, multiallelic, 
+                              aggr_ac, aggr_an, aggr_af, 
+                              aggr_ac_cbc, aggr_an_cbc, aggr_af_cbc, 
+                              aggr_ac_ubc, aggr_an_ubc, aggr_af_ubc,
+                              aggr_ac_cbc_fam, aggr_an_cbc_fam, aggr_af_cbc_fam, 
+                              aggr_ac_cbc_nofam, aggr_an_cbc_nofam, aggr_af_cbc_nofam, 
+                              aggr_ac_ubc_fam, aggr_an_ubc_fam, aggr_af_ubc_fam, 
+                              aggr_ac_ubc_nofam, aggr_an_ubc_nofam, aggr_af_ubc_nofam,
+                              cbc_ubc_call, cbc_ubc_fisher_p)) 
+  
+  # Clean-up
+  rm(vars, num_var, inverted, multiallelic, 
+     gt, gt_cbc, gt_ubc, 
+     gt_cbc_fam, gt_cbc_nofam,
+     gt_ubc_fam, gt_ubc_nofam,
+     aggr_ac, aggr_an, aggr_af, 
+     aggr_ac_cbc, aggr_an_cbc, aggr_af_cbc, 
+     aggr_ac_ubc, aggr_an_ubc, aggr_af_ubc,
+     aggr_ac_cbc_fam, aggr_an_cbc_fam, aggr_af_cbc_fam, 
+     aggr_ac_cbc_nofam, aggr_an_cbc_nofam, aggr_af_cbc_nofam, 
+     aggr_ac_ubc_fam, aggr_an_ubc_fam, aggr_af_ubc_fam, 
+     aggr_ac_ubc_nofam, aggr_an_ubc_nofam, aggr_af_ubc_nofam,
+     test.mx, cbc_ubc_call, cbc_ubc_fisher_p)
+
+}
+
+# Check results
+dim(genes_inv_aggr_info.mx)
+
+# Assign rownames
+genes -> rownames(genes_inv_aggr_info.mx)
+
+# Convert to df with appropriate datatypes
+genes_inv_aggr_info.df <- as.data.frame(genes_inv_aggr_info.mx, stringsAsFactors = FALSE)
+
+genes_inv_aggr_info.df$gene <- as.vector(genes_inv_aggr_info.df$gene)
+genes_inv_aggr_info.df$num_var <- as.numeric(genes_inv_aggr_info.df$num_var)
+
+genes_inv_aggr_info.df$inverted <- as.logical(genes_inv_aggr_info.df$inverted)
+genes_inv_aggr_info.df$multiallelic <- as.logical(genes_inv_aggr_info.df$multiallelic)
+
+genes_inv_aggr_info.df$aggr_ac <-as.numeric(genes_inv_aggr_info.df$aggr_ac)
+genes_inv_aggr_info.df$aggr_an <-as.numeric(genes_inv_aggr_info.df$aggr_an)
+genes_inv_aggr_info.df$aggr_af <-as.numeric(genes_inv_aggr_info.df$aggr_af)
+
+genes_inv_aggr_info.df$aggr_ac_cbc <-as.numeric(genes_inv_aggr_info.df$aggr_ac_cbc)
+genes_inv_aggr_info.df$aggr_an_cbc <-as.numeric(genes_inv_aggr_info.df$aggr_an_cbc)
+genes_inv_aggr_info.df$aggr_af_cbc <-as.numeric(genes_inv_aggr_info.df$aggr_af_cbc)
+
+genes_inv_aggr_info.df$aggr_ac_ubc <-as.numeric(genes_inv_aggr_info.df$aggr_ac_ubc)
+genes_inv_aggr_info.df$aggr_an_ubc <-as.numeric(genes_inv_aggr_info.df$aggr_an_ubc)
+genes_inv_aggr_info.df$aggr_af_ubc <-as.numeric(genes_inv_aggr_info.df$aggr_af_ubc)
+
+genes_inv_aggr_info.df$aggr_ac_cbc_fam <-as.numeric(genes_inv_aggr_info.df$aggr_ac_cbc_fam)
+genes_inv_aggr_info.df$aggr_an_cbc_fam <-as.numeric(genes_inv_aggr_info.df$aggr_an_cbc_fam)
+genes_inv_aggr_info.df$aggr_af_cbc_fam <-as.numeric(genes_inv_aggr_info.df$aggr_af_cbc_fam)
+
+genes_inv_aggr_info.df$aggr_ac_cbc_nofam <-as.numeric(genes_inv_aggr_info.df$aggr_ac_cbc_nofam)
+genes_inv_aggr_info.df$aggr_an_cbc_nofam <-as.numeric(genes_inv_aggr_info.df$aggr_an_cbc_nofam)
+genes_inv_aggr_info.df$aggr_af_cbc_nofam <-as.numeric(genes_inv_aggr_info.df$aggr_af_cbc_nofam)
+
+genes_inv_aggr_info.df$aggr_ac_ubc_fam <-as.numeric(genes_inv_aggr_info.df$aggr_ac_ubc_fam)
+genes_inv_aggr_info.df$aggr_an_ubc_fam <-as.numeric(genes_inv_aggr_info.df$aggr_an_ubc_fam)
+genes_inv_aggr_info.df$aggr_af_ubc_fam <-as.numeric(genes_inv_aggr_info.df$aggr_af_ubc_fam)
+
+genes_inv_aggr_info.df$aggr_ac_ubc_nofam <-as.numeric(genes_inv_aggr_info.df$aggr_ac_ubc_nofam)
+genes_inv_aggr_info.df$aggr_an_ubc_nofam <-as.numeric(genes_inv_aggr_info.df$aggr_an_ubc_nofam)
+genes_inv_aggr_info.df$aggr_af_ubc_nofam <-as.numeric(genes_inv_aggr_info.df$aggr_af_ubc_nofam)
+
+genes_inv_aggr_info.df$cbc_ubc_call <-as.factor(genes_inv_aggr_info.df$cbc_ubc_call)
+genes_inv_aggr_info.df$cbc_ubc_fisher_p <-as.numeric(genes_inv_aggr_info.df$cbc_ubc_fisher_p)
+
+# Explore the result
+str(genes_inv_aggr_info.df)
+summary(genes_inv_aggr_info.df$inverted)
+summary(genes_inv_aggr_info.df$multiallelic)
+summary(genes_inv_aggr_info.df$cbc_ubc_call)
+
+# QQ-plot
+qqunif.plot(genes_inv_aggr_info.df$cbc_ubc_fisher_p, 
+            main="CBC vs UBC\ncrude aggregated allelic frequencies\nFisher exact p-values")
+
+# Top 10 genes
+x <- genes_inv_aggr_info.df[,c("gene","aggr_af_ubc", "aggr_af_cbc", "cbc_ubc_call", "cbc_ubc_fisher_p")]
+x <- x[order(x$cbc_ubc_fisher_p),]
+x[x$cbc_ubc_fisher_p<0.05,c("aggr_af_ubc", "aggr_af_cbc", "cbc_ubc_call", "cbc_ubc_fisher_p")]
+x[x$gene %in% c("ATM","CHEK2"),c("aggr_af_ubc", "aggr_af_cbc", "cbc_ubc_call", "cbc_ubc_fisher_p")]
+
+# Clean-up
+rm(header, gene, genes, 
+   cbc_cases, ubc_cases, 
+   cbc_fam_cases, cbc_nofam_cases,
+   ubc_fam_cases, ubc_nofam_cases,
+   x, genes_inv_aggr_info.mx, qqunif.plot)
+
+```
+
+## explore_inv_aggr_alt_counts_per_gene
+
+```{r explore_inv_aggr_alt_counts_per_gene}
+
+# Get alt alleles counts
+inv_aggr_ac <- genes_inv_aggr_info.df$aggr_ac
+names(inv_aggr_ac) <- rownames(genes_inv_aggr_info.df)
+
+# Genes with highest counts of rare protein-affecting alt-alleles
+x <- inv_aggr_ac[order(-inv_aggr_ac)]
+mean(x) # ~5.4
+median(x) # 2
+x[1:200]
+
+# Histograms of aggregated MACs
+hist(inv_aggr_ac, labels = TRUE, ylim=c(0,8000), 
+     xlab="inv-aggr-ACs (aggr-MACs) per gene", ylab="num of genes")
+
+hist(inv_aggr_ac[inv_aggr_ac<=10], breaks=c(0:10), 
+     labels = TRUE, ylim=c(0,4000), main="zoom to aggr-MAC <= 10 (per 478 cases)", 
+     xlab="aggregated inverted ACs (MACs) per gene", ylab="num of genes")
+
+# Counts < 10 (< 1% aggregated MAF) - too rare for analysis ??
+sum(inv_aggr_ac < 10) # 7,383
+
+# Genes that may be analysed
+sum(inv_aggr_ac >= 10) # 1,266 (ATM=15; CHEK2=19)
+
+# Aggregated MACs > 50 (~ >5% aggregated MAF)
+sum(inv_aggr_ac > 50) # 53
+
+# Clean-up
+rm(inv_aggr_ac, x)
+
+```
+
+# data_summary
+
+```{r data_summary}
+
+dim(genotypes.mx)
+class(genotypes.mx)
+genotypes.mx[1:5,1:5]
+
+dim(kgen.df)
+colnames(kgen.df)
+kgen.df[1:5,1:5]
+
+dim(exac.df)
+colnames(exac.df)
+exac.df[1:5,1:5]
+
+dim(variants.df)
+str(variants.df)
+variants.df[1:5,1:5]
+
+dim(phenotypes.df)
+str(phenotypes.df)
+phenotypes.df[1:5,1:5]
+
+dim(genotypes_inv.mx)
+class(genotypes_inv.mx)
+genotypes_inv.mx[1:5,1:5]
+
+dim(variants_inv.df)
+str(variants_inv.df)
+variants_inv.df[1:5,1:5]
+
+dim(genes_inv_aggr_data.mx)
+class(genes_inv_aggr_data.mx)
+genes_inv_aggr_data.mx[1:5,1:5]
+
+dim(genes_inv_aggr_info.df)
+str(genes_inv_aggr_info.df)
+genes_inv_aggr_info.df[1:5,1:5]
+
+# Check consistency of rownames and colnames
+sum(colnames(genotypes.mx) != rownames(phenotypes.df))
+sum(rownames(genotypes.mx) != rownames(kgen.df))
+sum(rownames(genotypes.mx) != rownames(exac.df))
+sum(rownames(genotypes.mx) != rownames(variants.df))
+
+sum(colnames(genes_inv_aggr_data.mx) != rownames(phenotypes.df))
+sum(rownames(genes_inv_aggr_info.df) != rownames(genes_inv_aggr_data.mx))
+
+```
+
+# save_data
+
+```{r save_data}
+
+#base_folder="/analysis/mtgroup_share/users/alexey/wecare_only_08.17"
+save.image(paste(base_folder, "results", "r08_filter_by_inverted_af_wecare_only.RData", sep="/"))
+
+```
+
+# final_section
+
+```{r final_section}
+
+ls()
+sessionInfo()
+Sys.time()
+
+```
